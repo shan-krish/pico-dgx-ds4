@@ -765,7 +765,7 @@ async fn chat(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> R
     dump(&app, &req, &p, &gen);
     let id = format!("chatcmpl-{}", app.random_hex(24));
     let created = now_secs();
-    let model = app.cfg.model_name.clone();
+    let model = if p.model.is_empty() { app.cfg.model_name.clone() } else { p.model.clone() };
     // non-streaming
     let (mut reasoning, mut content, mut calls) = (String::new(), String::new(), Vec::new());
     let mut out = Vec::new();
@@ -845,7 +845,7 @@ fn stream(app: Arc<App>, p: Prepared, req: Value, pass: Option<Pass>) -> Respons
         dump(&app, &req, &p, &gen);
         let id = format!("chatcmpl-{}", app.random_hex(24));
         let created = now_secs();
-        let model = app.cfg.model_name.clone();
+        let model = if p.model.is_empty() { app.cfg.model_name.clone() } else { p.model.clone() };
         let chunk = |delta: Value, finish: Option<&str>| {
             json!({"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
                    "choices": [{"index": 0, "delta": delta, "logprobs": null, "finish_reason": finish}]})
