@@ -463,6 +463,8 @@ struct Usage {
     cached: u32,
     completion: usize,
     reasoning: usize,
+    ttft_s: f64,  // request arrival to first token
+    total_s: f64, // request arrival to the last token
 }
 
 impl Usage {
@@ -470,7 +472,10 @@ impl Usage {
         json!({"prompt_tokens": self.prompt, "completion_tokens": self.completion,
                "total_tokens": self.prompt + self.completion,
                "prompt_tokens_details": {"cached_tokens": self.cached},
-               "completion_tokens_details": {"reasoning_tokens": self.reasoning}})
+               "completion_tokens_details": {"reasoning_tokens": self.reasoning},
+               // llama.cpp-style per-request timings, so a proxy can log prefill and decode speed
+               "timings": {"prompt_n": self.prompt.saturating_sub(self.cached as usize), "prompt_ms": self.ttft_s * 1000.0,
+                           "predicted_n": self.completion, "predicted_ms": (self.total_s - self.ttft_s).max(0.0) * 1000.0}})
     }
 }
 
@@ -580,9 +585,10 @@ impl Gen {
                         _ => 0,
                     };
                     self.app.sessions.lock().unwrap().finish(self.session_id, &self.prompt_text, &self.prompt_ids, &self.ids, &self.app.tok);
-                    let usage = Usage { prompt: self.prompt_ids.len(), cached: d.cached_tokens, completion: self.kept, reasoning };
                     let total = self.t0.elapsed().as_secs_f64();
                     let ttft = self.first_token.map_or(total, |t| (t - self.t0).as_secs_f64());
+                    let usage = Usage { prompt: self.prompt_ids.len(), cached: d.cached_tokens, completion: self.kept, reasoning,
+                                        ttft_s: ttft, total_s: total };
                     if let Some(dir) = &self.app.cfg.dump_dir {
                         // the output's ids: the first `kept` count as output, the rest came after a stop
                         let rec = json!({"req_id": self.req_id, "ids": self.ids, "kept": self.kept, "finish": finish.as_str(),
