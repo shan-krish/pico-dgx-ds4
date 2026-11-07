@@ -42,7 +42,8 @@ struct HashMap {
 
 // Row ids for positions [first, first + n) of a sequence whose raw token ids are tokens[0 ..
 // first + n). Only tokens[first - 3 ..] are read. `live` may be null; a position with live == 0
-// (an image span; never for text) blocks look-back, as in the reference.
+// (an image span; never for text) blocks look-back, as in the reference; so does a negative token id
+// (an image position, model.h image_id).
 // out: [n][kLayers][kCols], each id within its layer's table.
 void hash_positions(const HashMap& m, const int32_t* tokens, const uint8_t* live, int64_t first, int n,
                     uint32_t* out);

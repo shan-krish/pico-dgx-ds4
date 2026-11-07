@@ -321,6 +321,8 @@ void Model::Impl::bind(dsw::WeightFile& wf, comm::Ring& ring) {
       w.gate = dalloc<uint8_t>((size_t)kExperts * kDim * 2);
       comm::allgather(ch, g, w.gate, (size_t)kGatePart * kDim * 2, st);
       w.gate_bias = reinterpret_cast<const float*>(need(p + "ffn.gate.bias", DType::F32, {kExperts}));
+      if (wf.find(p + "ffn.gate.bias_vl"))
+        w.gate_bias_vl = reinterpret_cast<const float*>(need(p + "ffn.gate.bias_vl", DType::F32, {kExperts}));
     }
     {
       dsk::MoeWeights& m = w.moe;

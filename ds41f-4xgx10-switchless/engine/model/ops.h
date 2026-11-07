@@ -175,8 +175,9 @@ void engram_pack(const uint8_t* rows, const uint32_t* off, int R, uint8_t* xq, u
 // over its 1280 columns of each copy, then its 1280 value columns (kEngramPartBytes per row).
 // kv [R][6400] from wkv; w [4][5120] = q_weight * k_weight (fp32).
 void engram_partial(const bf16* x, const bf16* kv, const float* w, int rank, int R, uint8_t* out, cudaStream_t s);
-// y = bf16(h + gate * value) from the gathered parts [4][R][kEngramPartBytes]; y may alias x.
-void engram_combine(const bf16* x, const uint8_t* gath, int R, bf16* y, cudaStream_t s);
+// y = bf16(h + gate * value) from the gathered parts [4][R][kEngramPartBytes]; y may alias x. Rows with
+// skip[row] != 0 (image positions: the reference shuts their gate) pass through unchanged.
+void engram_combine(const bf16* x, const uint8_t* gath, int R, bf16* y, cudaStream_t s, const uint8_t* skip = nullptr);
 
 // ---- collectives fused with their neighbours (fused.cu) ----
 // Each is a PDL launch: it waits (griddepcontrol.wait) for the kernel before it, posts its

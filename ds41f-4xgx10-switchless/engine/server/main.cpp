@@ -262,6 +262,7 @@ struct Args {
   std::string mode = "prefill";
   std::string golden = "/data/dsgb10/golden/prose";
   std::string weights, hashmap, shard[2];
+  std::string vision;  // --vision: the vision tower's safetensors file
   bool inject = false, inject_sub = false, no_engram = false, quiet = false, graphs = true, per_position = false;
   bool profile = false;  // decode: the decode loop is nsys's capture range (--capture-range=cudaProfilerApi)
   bool loop = false, big = false, ced = false, exact = false, graph_sweep = false;
@@ -323,6 +324,7 @@ Args parse(int argc, char** argv) {
     else if (s == "--mode") a.mode = val();
     else if (s == "--golden") a.golden = val();
     else if (s == "--weights") a.weights = val();
+    else if (s == "--vision") a.vision = val();  // the vision tower (vision/vision.h): prompts may hold images
     else if (s == "--hashmap") a.hashmap = val();
     else if (s == "--shard1") a.shard[0] = val();
     else if (s == "--shard14") a.shard[1] = val();
@@ -525,6 +527,7 @@ uint64_t run_id(const Args& a) {
     h = keepfile::fnv(v, sizeof v, h);
   };
   file(a.weights);
+  if (!a.vision.empty()) file(a.vision);
   if (!a.no_engram) file(a.hashmap), file(a.shard[0]), file(a.shard[1]);
   const int64_t o[] = {a.max_ctx, a.exact, a.spec, a.draft_fp8, a.prefill_rows, a.small_rows, a.snap_every,
                        a.no_engram, a.layers, a.first, (int64_t)a.ring_cap, a.draft_head4, a.draft_markov8};
@@ -652,6 +655,8 @@ int main(int argc, char** argv) {
       std::printf("free device memory after the prefill buffers, ranks 0-3: %.2f %.2f %.2f %.2f GiB\n",
                   all[0] / 1073741824.0, all[1] / 1073741824.0, all[2] / 1073741824.0, all[3] / 1073741824.0);
   }
+  // 5b. the vision tower and the buffers of its rows (serve), before the session store takes the free memory
+  if (a.mode == "serve" && !a.vision.empty()) m.load_vision(a.vision);
   // 6. serve: nothing takes device memory after startup (DESIGN.md's hardening list: CUDA takes only free
   // pages, and the page cache grows into them). The spec step's graphs of every context bucket first, then
   // the sessions' store: each rank offers its free device memory and its available host memory
@@ -751,6 +756,7 @@ int main(int argc, char** argv) {
     so.keep_bytes = std::min(m.state_disk_capacity(), (size_t)(a.keep_gib * 1073741824.0));  // none without a file
     so.keep_age_s = a.keep_days * 86400;
     so.ced = !a.exact;
+    so.vision = !a.vision.empty();
     so.spec = a.spec;
     so.spec_drafts = a.spec_drafts;
     so.spec_thresh = a.spec_thresh;

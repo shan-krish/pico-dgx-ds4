@@ -19,6 +19,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = { version = "0.3", default-features = false }
+# images (src/image.rs): decoders, base64 data, http(s) image URLs
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+base64 = "0.22"
+ureq = "3"
 
 [profile.release]
 opt-level = 3

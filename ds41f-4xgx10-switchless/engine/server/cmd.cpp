@@ -102,6 +102,28 @@ void bcast_payload(comm::Ring& ring, void* data, size_t nbytes, int rank) {
   }
 }
 
+void bcast_images(comm::Ring& ring, const Cmd& c, std::vector<ImageCmd>& h, std::vector<uint8_t>& px, int rank) {
+  h.resize(c.n);
+  bcast_payload(ring, h.data(), h.size() * sizeof(ImageCmd), rank);
+  size_t bytes = 0;
+  for (const ImageCmd& x : h) {
+    if (!x.grid().valid()) die("cmd: bad image grid at %d", x.pos);
+    bytes += x.grid().pixel_bytes();
+  }
+  px.resize(bytes);
+  bcast_payload(ring, px.data(), bytes, rank);
+}
+
+void run_images(model::Model& m, const std::vector<ImageCmd>& h, const std::vector<uint8_t>& px) {
+  std::vector<model::Model::ImageIn> in;
+  size_t off = 0;
+  for (const ImageCmd& x : h) {
+    in.push_back({x.pos, x.grid(), px.data() + off});
+    off += x.grid().pixel_bytes();
+  }
+  m.set_images(in);
+}
+
 model::Ctl to_ctl(const Cmd& c) {
   model::Ctl t{};
   t.op = model::kOpStep;
@@ -759,6 +781,13 @@ void follow(model::Model& m, comm::Ring& ring, Watchdog& wd, int rank) {
       std::vector<int32_t> t(c.n);
       bcast_payload(ring, t.data(), t.size() * 4, rank);
       m.set_tokens(c.pos0, c.n, t.data());
+    } else if (c.op == kCmdImages) {
+      std::vector<ImageCmd> h;
+      std::vector<uint8_t> px;
+      bcast_images(ring, c, h, px, rank);
+      wd.started = now_s();
+      run_images(m, h, px);
+      wd.started = 0;
     } else if (c.op == kCmdPrefill) {
       wd.started = now_s();
       const uint64_t n = run_prefill(m, c);

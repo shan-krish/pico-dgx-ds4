@@ -37,6 +37,7 @@ enum SubmitFlags : uint32_t {
   kFlagSeed = 1,      // use SubmitHeader::seed
   kFlagKeep = 2,      // keep the session's state after DONE
   kFlagLogprobs = 4,  // send logprobs in TOKENS
+  kFlagImages = 16,   // the prompt is followed by uint32 n_images, then n_images x (ImageHeader, pixels)
 };
 
 struct SubmitHeader {
@@ -53,6 +54,16 @@ struct SubmitHeader {
   uint32_t prefix_hint;      // prompt tokens the front-end expects to match the session (advisory)
   uint32_t n_stop_ids;       // ids that end generation (EOS is in here)
   uint32_t n_prompt;         // >= 1
+  uint32_t reserved;
+};
+
+// One image of a SUBMIT with kFlagImages (docs/vision.md): its span starts at prompt position pos and takes
+// n_llm_h * (n_llm_w + 1) + 2 positions, each holding the same negative id (0x80000000 | 30 bits of the
+// image's digest). The pixels follow: the letterboxed picture, uint8 RGB, n_vit_h * 14 rows of n_vit_w * 14.
+struct ImageHeader {
+  uint32_t pos;
+  uint32_t n_vit_h, n_vit_w;  // the ViT's patch grid
+  uint32_t n_llm_h, n_llm_w;  // the aligner's token grid: ceil(n_vit / 3) each way
   uint32_t reserved;
 };
 
@@ -118,6 +129,7 @@ static_assert(offsetof(SubmitHeader, n_prompt) == 64);
 static_assert(sizeof(HelloEngine) == 24);
 static_assert(sizeof(TokensHeader) == 16);
 static_assert(sizeof(TopLogprob) == 8);
+static_assert(sizeof(ImageHeader) == 24);
 static_assert(sizeof(DoneHeader) == 56);
 static_assert(offsetof(DoneHeader, queue_us) == 24);
 

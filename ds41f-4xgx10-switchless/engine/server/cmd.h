@@ -65,6 +65,7 @@ enum : int32_t {
   // BatchEntry's and then their tokens follow as payloads. (20: clear of the batch commands added beside it.)
   kCmdBatchTf = 20,
   kCmdSpecBatch = 8,  // spec_batch_loop (B3): the same with drafts; the Cmd's spec_* fields as kCmdDecode's
+  kCmdImages = 9,     // set_images: n images, their ImageCmd's and then their pixels follow as payloads
 };
 enum : uint32_t { kPfSample = 1, kPfCed = 2 };  // kPfCed: a CED chunk (Model::prefill's ced, docs/ced.md)
 struct Cmd {
@@ -115,6 +116,15 @@ void apply_ops(model::Model& m, const Cmd& c);
 // rank 0's payload of nbytes, to every rank (in pieces of 64 KiB, the bootstrap sockets' limit)
 void bcast_payload(comm::Ring& ring, void* data, size_t nbytes, int rank);
 model::Ctl to_ctl(const Cmd& c);
+
+// kCmdImages's payloads after bcast: c.n headers, then every image's pixels (vis::Grid::pixel_bytes each) in
+// order; rank 0 sends them, the others receive them. Then every rank runs the tower (Model::set_images).
+struct ImageCmd {
+  int32_t pos = 0, n_vit_h = 0, n_vit_w = 0, n_llm_h = 0, n_llm_w = 0, reserved = 0;
+  vis::Grid grid() const { return {n_vit_h, n_vit_w, n_llm_h, n_llm_w}; }
+};
+void bcast_images(comm::Ring& ring, const Cmd& c, std::vector<ImageCmd>& h, std::vector<uint8_t>& px, int rank);
+void run_images(model::Model& m, const std::vector<ImageCmd>& h, const std::vector<uint8_t>& px);
 
 // A prefill chunk on this rank (every rank alike): positions [pos0, pos0 + rows) of the tokens set
 // before; with kPfSample the last row is sampled (the step's number), else ~0.

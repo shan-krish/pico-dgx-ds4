@@ -33,7 +33,7 @@ Front-end → rank 0
 | type | name | payload |
 |---|---|---|
 | 0x01 | `HELLO` | `{u32 version; u32 reserved}` |
-| 0x02 | `SUBMIT` | `SubmitHeader`, `u32 stop_ids[n_stop_ids]`, `u32 prompt[n_prompt]` |
+| 0x02 | `SUBMIT` | `SubmitHeader`, `u32 stop_ids[n_stop_ids]`, `u32 prompt[n_prompt]`; with `kFlagImages`, then `u32 n_images` and per image an `ImageHeader` and its pixels (docs/vision.md) |
 | 0x03 | `CANCEL` | `{u64 req_id}` |
 | 0x04 | `RELEASE` | `{u64 session_id}`: the front-end will not continue this session; free its state |
 
@@ -93,6 +93,12 @@ struct DoneHeader {              // 56 bytes
 - With `LOGPROBS`, `TOKENS` carries the log-probability of each sampled id under the distribution it
   was sampled from (after temperature, before top-k/top-p), and, if `n_top_logprobs > 0`, the top
   ids of that distribution. The mock engine sends zeros.
+
+**Images** (`kFlagImages`, docs/vision.md). Each image's span is a run of prompt positions that all hold one
+negative id, `0x80000000 | 30 bits of the image's digest`; its `ImageHeader` gives the span's first position and
+the patch and token grids (the span is `n_llm_h * (n_llm_w + 1) + 2` long), and its pixels follow: the
+letterboxed picture, uint8 RGB, `n_vit_h * 14` rows of `n_vit_w * 14`. Rank 0 rejects spans outside the prompt
+or out of order, an image position outside every span, and images to an engine without `--vision`.
 
 ## Sessions and exact prefix reuse
 

@@ -61,6 +61,7 @@ struct LayerW {
   // FFN
   uint8_t* gate = nullptr;  // bf16 [384][5120], tile_fp8 layout: every rank's 96 rows, all-gathered at bind
   const float* gate_bias = nullptr;
+  const float* gate_bias_vl = nullptr;  // image positions' selection bias (the reference's bias_vl)
   dsk::MoeWeights moe{};
   // mHC: the full projections [24][20480] (all-gathered at bind), base [24], scale [3]
   float* hc_fn[2] = {};
@@ -216,6 +217,27 @@ struct Model::Impl {
   dsk::GemvCfg c8k{1, 1, 8}, c8{1, 1, 16}, cwoa{1, 4, 4}, cgate{1, 1, 8}, chead{2, 1, 16};
 
   std::unique_ptr<detail::Prefill> pf;
+  // images (image.cu): the tower, the request's images and their aligner rows; per prefill pass the rows'
+  // sources (vis_rows) and the image mask (vis_mask), staged and on the device
+  std::unique_ptr<vis::Vision> vision;
+  struct ImgEnt {
+    int pos;  // the span's first prompt position
+    vis::Grid g;
+    int row0;  // its first row in img_emb
+  };
+  std::vector<ImgEnt> imgs;
+  bf16* img_emb = nullptr;  // [kMaxImageRows][kDim]
+  int* vsrc_d = nullptr;
+  uint8_t* vmask_d = nullptr;
+  int32_t* vsrc_h = nullptr;
+  uint8_t* vmask_h = nullptr;
+  void vis_alloc();
+  int vis_slot(int q) const;
+  // positions [a, a + M): the mask of image positions, uploaded; false (nothing uploaded) when there is none
+  bool vis_mask(int a, int M);
+  // the same, and each row's source (k_vis_embed's), with tok's image ids made <｜deepseek_image｜>
+  bool vis_rows(int a, int M, int32_t* tok);
+  void vis_embed(int r0, int n, bf16* x);  // the chunk's rows [r0, r0 + n) (this rank's) into x
   std::unique_ptr<detail::Store> store_s;
   std::unique_ptr<detail::Spec> spec;
   bool mh_on = false;  // capturing a spec step: main_hidden at the inputs of layers 37-39

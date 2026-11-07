@@ -4,6 +4,7 @@ pub mod encoding;
 pub mod engine;
 pub mod gate;
 pub mod guard;
+pub mod image;
 pub mod mock;
 pub mod protocol;
 pub mod pyjson;

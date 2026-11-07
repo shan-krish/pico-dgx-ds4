@@ -256,7 +256,7 @@ void Model::Impl::engram_apply_p(int L, int M, int set) {
   for (int r = 0; r < kRanks; ++r)
     ops::engram_partial(p.x, p.e_kv + (size_t)r * p.Q * kEngramN, w.e_w, r, n, p.e_part + (size_t)r * n * kEngramPartBytes,
                         st);
-  ops::engram_combine(p.x, p.e_part, n, p.x, st);
+  ops::engram_combine(p.x, p.e_part, n, p.x, st, p.vis ? vmask_d + p.r0 : nullptr);  // image rows pass through
   (void)M;
 }
 
@@ -445,8 +445,10 @@ void Model::Impl::ffn_p(int L, int M) {
   const int Q = p.rq, r0 = p.r0, n = p.n;
   if (n > 0) {
     dsk::gemm_bf16_p(p.y, n, w.gate, kExperts, kDim, p.gl, st);
+    // image positions select with bias_vl (the reference's MoE gate)
+    const bool vl = p.vis && w.gate_bias_vl;
     dsk::router_topk(p.gl, w.gate_bias, n, kExperts, p.ridx + (size_t)r0 * kTopK, p.rwts + (size_t)r0 * kTopK,
-                     kRouteScale, st);
+                     kRouteScale, st, vl ? w.gate_bias_vl : nullptr, vl ? vmask_d + r0 : nullptr);
   }
   // every row's act_quant and routes for the MoE
   const comm::AgSeg ag[4] = {{p.yq + (size_t)r0 * kDim, p.yq, (size_t)Q * kDim},
@@ -561,6 +563,7 @@ void Model::Impl::ced_replay(int P, const std::vector<std::pair<int, uint8_t*>>&
     i += cnt;
   }
   ops::iota(p.pos, s, M, st);
+  p.vis = vis_mask(s, M);  // the replay's image positions route with bias_vl too
   for (int L = 20; L < kLayers; ++L) {
     NVTX_RANGE("rep L%02d", L);
     // here x holds this rank's replay rows' layer-L input (DSpark's hidden-state hook, a = s, M = 128)
@@ -602,9 +605,11 @@ uint64_t Model::Impl::prefill(int a, int M, const Sampling* sp, int handle, cons
   CUDA_CHECK(cudaEventRecord(ev_beg[slot], st));
   CUDA_CHECK(cudaEventRecord(ev_pf[0], st));
   std::memcpy(p.tok_h, hist.data() + a, (size_t)M * 4);
+  p.vis = vis_rows(a, M, p.tok_h);  // image spans: their ids become <｜deepseek_image｜>, their rows the tower's
   CUDA_CHECK(cudaMemcpyAsync(p.tok, p.tok_h, (size_t)M * 4, cudaMemcpyHostToDevice, st));
   ops::iota(p.pos, a, M, st);
   if (p.n > 0) ops::embed(embed, p.tok + p.r0, p.n, p.x, p.pm, st);
+  if (p.vis && p.n > 0) vis_embed(p.r0, p.n, p.x);
   if (ced && a != p.ced_end) std::fill(p.ced_pos, p.ced_pos + kReplay, -1);  // a new run of positions
   p.ced_end = ced ? a + M : -1;
 #ifdef DSGB10_NVTX
@@ -646,7 +651,7 @@ uint64_t Model::Impl::prefill(int a, int M, const Sampling* sp, int handle, cons
     const bf16* last = reinterpret_cast<const bf16*>(p.gath) + (size_t)((Mh - 1) / p.rq) * kDim;
     n = n_steps;
     if (n >= (uint64_t)ops::kInSlots) wait_done(n - ops::kInSlots);
-    const int32_t t = hist[a + M - 1];
+    const int32_t t = image_id(hist[a + M - 1]) ? kImageTokenId : hist[a + M - 1];
     next_in(n, 1, a + M - 1, &t, *sp);
     ops::step_in(in_h, in_ctr, fb, in_d, st);
     if (head_coded) dsk::gemv_bf16x_norm(last, norm_w, kNormEps, 1, head, kVocabPart, kDim, logits, nullptr, chead, st);

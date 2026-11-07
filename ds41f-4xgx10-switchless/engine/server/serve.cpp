@@ -134,6 +134,8 @@ struct Request {
   ConnP conn;
   fe::SubmitHeader h{};
   std::vector<int32_t> stop, prompt;
+  std::vector<ImageCmd> images;  // kFlagImages: the images' grids and spans, in prompt order
+  std::vector<uint8_t> pixels;   // and their pixels, one after the other
   double t_recv = 0;
 };
 
@@ -260,12 +262,38 @@ class Io {
       Request& r = e.rq;
       if (p.size() < sizeof r.h) return false;
       std::memcpy(&r.h, p.data(), sizeof r.h);
-      if (p.size() != sizeof r.h + 4 * (size_t(r.h.n_stop_ids) + r.h.n_prompt)) return false;
+      const size_t fixed = sizeof r.h + 4 * (size_t(r.h.n_stop_ids) + r.h.n_prompt);
+      const bool imgs = r.h.flags & fe::kFlagImages;
+      if (imgs ? p.size() < fixed + 4 : p.size() != fixed) return false;
       r.stop.resize(r.h.n_stop_ids);
       r.prompt.resize(r.h.n_prompt);
       const char* a = p.data() + sizeof r.h;
       if (!r.stop.empty()) std::memcpy(r.stop.data(), a, r.stop.size() * 4);
       if (!r.prompt.empty()) std::memcpy(r.prompt.data(), a + r.stop.size() * 4, r.prompt.size() * 4);
+      if (imgs) {  // n_images, then each image's header and pixels; the sizes are checked here, the spans in start()
+        size_t at = fixed;
+        uint32_t ni = 0;
+        std::memcpy(&ni, p.data() + at, 4);
+        at += 4;
+        if (ni > 256) return false;
+        for (uint32_t k = 0; k < ni; ++k) {
+          fe::ImageHeader ih;
+          if (p.size() < at + sizeof ih) return false;
+          std::memcpy(&ih, p.data() + at, sizeof ih);
+          at += sizeof ih;
+          ImageCmd x;
+          x.pos = (int32_t)std::min<uint32_t>(ih.pos, INT32_MAX);
+          x.n_vit_h = (int32_t)std::min<uint32_t>(ih.n_vit_h, 1u << 16), x.n_vit_w = (int32_t)std::min<uint32_t>(ih.n_vit_w, 1u << 16);
+          x.n_llm_h = (int32_t)std::min<uint32_t>(ih.n_llm_h, 1u << 16), x.n_llm_w = (int32_t)std::min<uint32_t>(ih.n_llm_w, 1u << 16);
+          if (!x.grid().valid()) return false;
+          const size_t nb = x.grid().pixel_bytes();
+          if (p.size() < at + nb) return false;
+          r.pixels.insert(r.pixels.end(), p.data() + at, p.data() + at + nb);
+          at += nb;
+          r.images.push_back(x);
+        }
+        if (at != p.size()) return false;
+      }
       r.conn = c;
       r.t_recv = now_s();
       push(std::move(e));
@@ -526,7 +554,7 @@ class Server {
         s.enc_snaps.resize(ne);
         for (int& e : s.enc_snaps) e = r.get<int32_t>();
         bool ok = r.ok && id && !kept.count(id) && s.h > 0 && wall - s.t_used <= o_.keep_age_s;
-        for (const int32_t t : s.hist) ok = ok && t >= 0 && t < model::kVocab;
+        for (const int32_t t : s.hist) ok = ok && t < model::kVocab;  // negative: an image position
         const model::Model::StateInfo si = m_.state_info(s.h);
         ok = ok && si.on_disk && si.saved <= nh && si.end_pos <= nh;
         for (const auto& [k, x] : kept) ok = ok && x.h != s.h;
@@ -856,6 +884,57 @@ class Server {
     start(std::move(rq));
   }
 
+  // The prompt's image positions (negative ids) against the request's images: every image's span inside the
+  // prompt and in order, each span one id throughout, and no image position outside a span.
+  std::string check_images(const Request& r) const {
+    const std::vector<int32_t>& t = r.prompt;
+    if (!r.images.empty() && !o_.vision) return "images, and this engine has no vision tower (--vision)";
+    int next = 0, rows = 0;
+    for (const ImageCmd& x : r.images) {
+      const int s = x.pos, e = x.pos + x.grid().span();
+      if (s < next || e > (int)t.size()) return "an image span outside the prompt, or out of order";
+      for (int q = next; q < s; ++q)
+        if (model::image_id(t[q])) return "an image position outside every image's span";
+      for (int q = s; q < e; ++q)
+        if (t[q] != t[s] || !model::image_id(t[q])) return "an image span whose ids are not one image id";
+      rows += x.grid().rows();
+      next = e;
+    }
+    for (int q = next; q < (int)t.size(); ++q)
+      if (model::image_id(t[q])) return "an image position outside every image's span";
+    if (rows > model::kMaxImageRows) return "more than " + std::to_string(model::kMaxImageRows) + " image rows in one request";
+    return "";
+  }
+
+  // The tower over the images whose spans reach [q, n) (the rest is in the state already), every rank alike.
+  void images(const Request& r, int q) {
+    std::vector<ImageCmd> h;
+    std::vector<uint8_t> px;
+    size_t off = 0;
+    for (const ImageCmd& x : r.images) {
+      const size_t nb = x.grid().pixel_bytes();
+      if (x.pos + x.grid().span() > q) {
+        h.push_back(x);
+        px.insert(px.end(), r.pixels.begin() + off, r.pixels.begin() + off + nb);
+      }
+      off += nb;
+    }
+    if (h.empty()) return;
+    Cmd c{};
+    c.op = kCmdImages;
+    c.n = (int)h.size();
+    issue(c);
+    bcast_images(ring_, c, h, px, 0);
+    wd_.started = now_s();
+    run_images(m_, h, px);
+    wd_.started = 0;
+  }
+  static bool has_image(const std::vector<int32_t>& t, int a, int n) {
+    for (int i = a; i < a + n; ++i)
+      if (model::image_id(t[i])) return true;
+    return false;
+  }
+
   // A request checked, then its flight's first run.
   void start(Request&& rq) {
     Flight f;
@@ -871,7 +950,8 @@ class Server {
     else if (f.rq.stop.size() > (size_t)kMaxStop) err = "more than " + std::to_string(kMaxStop) + " stop ids";
     else if (!(h.temperature >= 0.f) || !(h.top_p > 0.f && h.top_p <= 1.f)) err = "bad sampling parameters";
     for (const int32_t t : f.rq.prompt)
-      if (err.empty() && (t < 0 || t >= model::kVocab)) err = "token id out of range";
+      if (err.empty() && t >= model::kVocab) err = "token id out of range";
+    if (err.empty()) err = check_images(f.rq);
     if (!err.empty() || Io::cancelled(f.rq)) {
       done(f.rq, err.empty() ? fe::kCancelled : fe::kError, 0, 0, f.t_start, 0, err);
       return Io::forget(f.rq);
@@ -1026,6 +1106,7 @@ class Server {
       m_.set_tokens(c.pos0, c.n, t.data());
       tu.ops_ms = 1e3 * (now_s() - (resume ? t0 : f.t_start));
     }
+    images(f.rq, q);  // the tower's rows for the spans the prefill reaches
     // ---- prefill [q, n): chunks of prefill_rows; a short remainder as one step
     int pos = q;
     model::SampleOut first{};
@@ -1048,7 +1129,7 @@ class Server {
         if (sn >= 128 && c.n_snaps < kMaxSnaps && (!o_.snap_thin || keep_snap(sn, n, o_.snap_every)))
           c.snaps[c.n_snaps++] = sn;  // none that the prompt's end would thin at once
       wd_.started = now_s();
-      if (R <= o_.small_rows && !ced) {
+      if (R <= o_.small_rows && !ced && !has_image(prompt, pos, R)) {  // an image span takes the prefill path
         c.op = kCmdRows;
         std::copy(prompt.begin() + pos, prompt.begin() + pos + R, c.tokens);
         issue(c);

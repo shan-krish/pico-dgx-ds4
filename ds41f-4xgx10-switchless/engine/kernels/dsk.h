@@ -172,8 +172,9 @@ void rmsnorm(const __nv_bfloat16* x, const __nv_bfloat16* w, int M, int D, float
              uint8_t* s, cudaStream_t st);
 // Router selection from fp32 logits [M][E] (E <= 512): scores sqrt(softplus(l)), top-6 of
 // scores + bias (descending), weights = scores / (sum + 1e-20) * route_scale.
+// bias2 / use2 (both or neither): rows with use2[row] != 0 select with bias2 instead (image positions: bias_vl)
 void router_topk(const float* logits, const float* bias, int M, int E, int* idx, float* wts, float route_scale,
-                 cudaStream_t st);
+                 cudaStream_t st, const float* bias2 = nullptr, const uint8_t* use2 = nullptr);
 // wide64: the same with batch-aware re-routing (moe_routed's DSGB10_OEA): every row keeps its top k0, its other
 // picks prefer the step's core (the union of every row's top k0) among its top kp. One CTA. Lossy.
 void router_topk_oea(const float* logits, const float* bias, int M, int E, int* idx, float* wts, float route_scale, int k0,

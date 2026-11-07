@@ -9,7 +9,7 @@ use crate::encoding::{api_tool_name, encode_messages, Delta, EncodeOptions, Enco
 use crate::engine::{EngineClient, Event as EngineEvent};
 use crate::gate::{Gate, Pass, Refused, RETRY_AFTER_S};
 use crate::guard::{LoopGuard, StopMatcher, LINE_WINDOW_TOKENS};
-use crate::protocol::{DoneReason, Submit, FLAG_KEEP, FLAG_SEED};
+use crate::protocol::{DoneReason, Submit, FLAG_IMAGES, FLAG_KEEP, FLAG_SEED};
 use crate::pyjson::truthy;
 use crate::session::SessionTable;
 use crate::tokenizer::{StreamDecoder, Tokenizer};
@@ -207,6 +207,8 @@ pub struct Prepared {
     /// besides EOS, unless ignore_eos
     pub stop_ids: Vec<u32>,
     pub ignore_eos: bool,
+    /// the prompt's images in order (encoding.rs's records: one placeholder each in `prompt`)
+    pub images: Vec<Value>,
 }
 
 fn num_f64(v: &Value) -> Option<f64> {
@@ -306,15 +308,23 @@ fn convert_messages(msgs: &[Value]) -> Result<Vec<Value>, String> {
         let content = match o.get("content") {
             None | Some(Value::Null) => json!(""),
             Some(Value::Array(parts)) => {
+                let mut out = Vec::with_capacity(parts.len());
                 for p in parts {
                     match p.get("type").and_then(Value::as_str) {
-                        Some("image_url" | "image" | "input_image" | "video_url" | "input_audio" | "audio_url") => {
-                            return Err("image, audio and video input are not supported".into())
+                        Some("video_url" | "input_audio" | "audio_url") => return Err("audio and video input are not supported".into()),
+                        // the Responses API's form: image_url is the URL itself
+                        Some("input_image") => {
+                            let url = match p.get("image_url") {
+                                Some(Value::String(u)) => u.clone(),
+                                Some(v) => v.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+                                None => String::new(),
+                            };
+                            out.push(json!({"type": "image_url", "image_url": {"url": url}}));
                         }
-                        _ => {}
+                        _ => out.push(p.clone()),
                     }
                 }
-                Value::Array(parts.clone())
+                Value::Array(out)
             }
             Some(c) => c.clone(),
         };
@@ -387,7 +397,7 @@ pub fn prepare(cfg: &ServerConfig, req: &Value) -> Result<Prepared, String> {
     let mut o = EncodeOptions::new(mode);
     o.reasoning_effort = Some(&budget);
     o.encoding = cfg.encoding;
-    let (prompt, _) = encode_messages(&messages, &o).map_err(|e| format!("cannot encode messages: {e}"))?;
+    let (prompt, images) = encode_messages(&messages, &o).map_err(|e| format!("cannot encode messages: {e}"))?;
 
     // sampling and limits
     let max_tokens = match r.get("max_completion_tokens").filter(|v| !v.is_null()).or(r.get("max_tokens").filter(|v| !v.is_null())) {
@@ -436,6 +446,7 @@ pub fn prepare(cfg: &ServerConfig, req: &Value) -> Result<Prepared, String> {
         stops,
         stop_ids,
         ignore_eos,
+        images,
     })
 }
 
@@ -488,6 +499,8 @@ struct Gen {
     session_id: u64,
     prompt_text: String,
     prompt_ids: Vec<u32>,
+    /// the ids the engine got: prompt_ids with each image placeholder expanded into its span
+    prompt_len: usize,
     rx: mpsc::UnboundedReceiver<EngineEvent>,
     stop_ids: Vec<u32>,
     stopper: StopMatcher,
@@ -587,7 +600,7 @@ impl Gen {
                     self.app.sessions.lock().unwrap().finish(self.session_id, &self.prompt_text, &self.prompt_ids, &self.ids, &self.app.tok);
                     let total = self.t0.elapsed().as_secs_f64();
                     let ttft = self.first_token.map_or(total, |t| (t - self.t0).as_secs_f64());
-                    let usage = Usage { prompt: self.prompt_ids.len(), cached: d.cached_tokens, completion: self.kept, reasoning,
+                    let usage = Usage { prompt: self.prompt_len, cached: d.cached_tokens, completion: self.kept, reasoning,
                                         ttft_s: ttft, total_s: total };
                     if let Some(dir) = &self.app.cfg.dump_dir {
                         // the output's ids: the first `kept` count as output, the rest came after a stop
@@ -660,16 +673,34 @@ async fn start(app: &Arc<App>, p: &Prepared, pass: Pass) -> Result<Gen, ApiError
     for s in released {
         app.engine.release(s);
     }
+    // images: decoded and letterboxed off the runtime, then each placeholder id becomes the image's span
+    let (ids, images) = if p.images.is_empty() {
+        (plan.ids.clone(), Vec::new())
+    } else {
+        let recs = p.images.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            recs.iter().map(|r| crate::image::load_bytes(r).and_then(|b| crate::image::prepare(&b))).collect::<Result<Vec<_>, String>>()
+        })
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "server_error".into(), e.to_string()))?;
+        match prepared.and_then(|v| crate::image::expand(&plan.ids, v)) {
+            Ok(x) => x,
+            Err(e) => {
+                app.sessions.lock().unwrap().abandon(plan.session_id);
+                return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request_error".into(), e));
+            }
+        }
+    };
     let ctx = info.max_context as usize;
-    if plan.ids.len() >= ctx {
+    if ids.len() >= ctx {
         app.sessions.lock().unwrap().abandon(plan.session_id);
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "invalid_request_error".into(),
-            format!("the prompt is {} tokens; the context window is {ctx}", plan.ids.len()),
+            format!("the prompt is {} tokens; the context window is {ctx}", ids.len()),
         ));
     }
-    let max_new = (p.max_tokens as usize).min(ctx - plan.ids.len()) as u32;
+    let max_new = (p.max_tokens as usize).min(ctx - ids.len()) as u32;
     let mut stop_ids = p.stop_ids.clone();
     if !p.ignore_eos {
         stop_ids.push(info.eos_id);
@@ -683,11 +714,12 @@ async fn start(app: &Arc<App>, p: &Prepared, pass: Pass) -> Result<Gen, ApiError
         top_p: p.top_p,
         top_k: p.top_k,
         max_new_tokens: max_new,
-        flags: FLAG_KEEP | if p.seed.is_some() { FLAG_SEED } else { 0 },
+        flags: FLAG_KEEP | if p.seed.is_some() { FLAG_SEED } else { 0 } | if images.is_empty() { 0 } else { FLAG_IMAGES },
         n_top_logprobs: 0,
         prefix_hint: plan.reused as u32,
         stop_ids: stop_ids.clone(),
-        prompt: plan.ids.clone(),
+        prompt: ids.clone(),
+        images,
     };
     let (req_id, rx) = match app.engine.submit(submit) {
         Ok(x) => x,
@@ -705,6 +737,7 @@ async fn start(app: &Arc<App>, p: &Prepared, pass: Pass) -> Result<Gen, ApiError
         session_id: plan.session_id,
         prompt_text: p.prompt.clone(),
         prompt_ids: plan.ids,
+        prompt_len: ids.len(),
         rx,
         stop_ids,
         stopper: StopMatcher::new(p.stops.clone()),

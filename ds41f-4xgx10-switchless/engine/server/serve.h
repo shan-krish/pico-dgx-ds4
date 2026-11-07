@@ -21,6 +21,7 @@ struct ServeOptions {
   size_t budget = 12ull << 30;     // --session-gib: at most this much of the store's pool (main.cpp reserves
                                    // it, model.h state_reserve) holds sessions' saved state; LRU eviction
   bool ced = true;                 // CED prefill (docs/ced.md) for turns of at least 128 new positions
+  bool vision = false;             // the vision tower is loaded (--vision): prompts may hold images
   int slice = 64;                  // time-slicing (docs/batching.md, B1): a new request pauses the requests
                                    // decoding and is prefilled; while more of them decode than there are
                                    // slots (Model::slots), they take turns of this many tokens. 0: no turns

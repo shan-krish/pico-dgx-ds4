@@ -68,6 +68,7 @@ struct Prefill {
   cudaStream_t cs = nullptr;  // the reduce-scatters of the column groups (high priority)
   cudaEvent_t ev_grp[kColGroups], ev_cs;
   int32_t* tok_h;  // pinned staging of the chunk's tokens
+  bool vis = false;  // the pass holds image positions (vmask_d / vsrc_d are its rows')
   // CED: this rank's records of the positions kept (its own rows of them), every rank's (the replay's
   // all-gather); per slot the position (-1: none) and the rank whose row it was; the end of the last
   // encoder chunk (a chunk that does not continue it starts a new run of positions)

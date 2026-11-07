@@ -1,6 +1,6 @@
-add_library(dsmodel STATIC model.cu ops.cu fused.cu sample.cu prefill.cu state.cu spec.cu wave_probe.cu spill.cpp)
+add_library(dsmodel STATIC model.cu ops.cu fused.cu sample.cu prefill.cu state.cu spec.cu wave_probe.cu spill.cpp image.cu)
 target_include_directories(dsmodel PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(dsmodel PUBLIC dsattn dsk_kernels dsgb10_comm engram dsw_loader dspark)
+target_link_libraries(dsmodel PUBLIC dsattn dsk_kernels dsgb10_comm engram dsw_loader dspark dsvision)
 
 add_executable(coll_tests tests/coll_tests.cu)
 target_include_directories(coll_tests PRIVATE ${CMAKE_SOURCE_DIR}/attn/tests)

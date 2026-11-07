@@ -132,10 +132,15 @@ __global__ void k_engram_partial(const bf16* x, const bf16* kv, const float* w, 
 }
 
 // grid (R, 4): one copy of one row.
-__global__ void k_engram_combine(const bf16* x, const uint8_t* gath, int R, bf16* y) {
+__global__ void k_engram_combine(const bf16* x, const uint8_t* gath, int R, bf16* y, const uint8_t* skip) {
   __shared__ float red[32];
   const int p = blockIdx.x, c = blockIdx.y;
   const bf16* h = x + ((size_t)p * kHc + c) * kDim;
+  if (skip && skip[p]) {  // the whole block leaves together: the gate is shut, y = h
+    if (y != x)
+      for (int j = threadIdx.x; j < kDim; j += blockDim.x) y[((size_t)p * kHc + c) * kDim + j] = h[j];
+    return;
+  }
   float hs = 0.f;
   for (int j = threadIdx.x; j < kDim; j += blockDim.x) {
     const float v = bf(h[j]);
@@ -233,8 +238,8 @@ void engram_partial(const bf16* x, const bf16* kv, const float* w, int rank, int
   CUDA_CHECK(cudaGetLastError());
 }
 
-void engram_combine(const bf16* x, const uint8_t* gath, int R, bf16* y, cudaStream_t s) {
-  k_engram_combine<<<dim3(R, kHc), 256, 0, s>>>(x, gath, R, y);
+void engram_combine(const bf16* x, const uint8_t* gath, int R, bf16* y, cudaStream_t s, const uint8_t* skip) {
+  k_engram_combine<<<dim3(R, kHc), 256, 0, s>>>(x, gath, R, y, skip);
   CUDA_CHECK(cudaGetLastError());
 }
 

@@ -20,6 +20,8 @@ pub const T_DONE: u16 = 0x83;
 pub const FLAG_SEED: u32 = 1;
 pub const FLAG_KEEP: u32 = 2;
 pub const FLAG_LOGPROBS: u32 = 4;
+/// The prompt is followed by uint32 n_images and each image's ImageHeader and pixels (docs/vision.md).
+pub const FLAG_IMAGES: u32 = 16;
 
 pub const TOK_LOGPROBS: u32 = 1;
 pub const TOK_TOP: u32 = 2;
@@ -45,6 +47,18 @@ impl DoneReason {
     }
 }
 
+/// One image of a SUBMIT: its span starts at prompt position `pos`; the pixels are the letterboxed picture
+/// (uint8 RGB, n_vit_h * 14 rows of n_vit_w * 14).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubmitImage {
+    pub pos: u32,
+    pub n_vit_h: u32,
+    pub n_vit_w: u32,
+    pub n_llm_h: u32,
+    pub n_llm_w: u32,
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Submit {
     pub req_id: u64,
@@ -60,6 +74,8 @@ pub struct Submit {
     pub prefix_hint: u32,
     pub stop_ids: Vec<u32>,
     pub prompt: Vec<u32>,
+    /// with FLAG_IMAGES
+    pub images: Vec<SubmitImage>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -159,6 +175,13 @@ impl Frame {
                 w.u32(s.flags).u32(s.n_top_logprobs).u32(s.prefix_hint);
                 w.u32(s.stop_ids.len() as u32).u32(s.prompt.len() as u32).u32(0);
                 w.u32s(&s.stop_ids).u32s(&s.prompt);
+                if s.flags & FLAG_IMAGES != 0 {
+                    w.u32(s.images.len() as u32);
+                    for im in &s.images {
+                        w.u32(im.pos).u32(im.n_vit_h).u32(im.n_vit_w).u32(im.n_llm_h).u32(im.n_llm_w).u32(0);
+                        w.0.extend_from_slice(&im.pixels);
+                    }
+                }
                 w.finish()
             }
             Frame::Cancel { req_id } => {
@@ -231,6 +254,20 @@ impl Frame {
                 r.u32()?;
                 let stop_ids = r.u32s(n_stop)?;
                 let prompt = r.u32s(n_prompt)?;
+                let mut images = Vec::new();
+                if flags & FLAG_IMAGES != 0 {
+                    let n = r.u32()?;
+                    for _ in 0..n {
+                        let (pos, n_vit_h, n_vit_w, n_llm_h, n_llm_w) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+                        r.u32()?;
+                        let nb = n_vit_h as usize * 14 * n_vit_w as usize * 14 * 3;
+                        let mut pixels = Vec::with_capacity(nb);
+                        for _ in 0..nb / 4 {
+                            pixels.extend_from_slice(&r.u32()?.to_le_bytes());
+                        }
+                        images.push(SubmitImage { pos, n_vit_h, n_vit_w, n_llm_h, n_llm_w, pixels });
+                    }
+                }
                 Frame::Submit(Submit {
                     req_id,
                     session_id,
@@ -245,6 +282,7 @@ impl Frame {
                     prefix_hint,
                     stop_ids,
                     prompt,
+                    images,
                 })
             }
             T_CANCEL => Frame::Cancel { req_id: r.u64()? },
@@ -363,6 +401,7 @@ mod tests {
             prefix_hint: 5,
             stop_ids: vec![1],
             prompt: vec![0, 10, 20],
+            images: vec![],
         };
         let b = Frame::Submit(s.clone()).encode();
         assert_eq!(b.len(), 8 + 72 + 4 + 12); // header, SubmitHeader, stop id, prompt

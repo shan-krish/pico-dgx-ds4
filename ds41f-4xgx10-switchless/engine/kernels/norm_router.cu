@@ -22,14 +22,15 @@ __global__ void __launch_bounds__(1024) k_rmsnorm(const __nv_bfloat16* __restric
 
 // One warp per row.
 __global__ void k_router_topk(const float* __restrict__ logits, const float* __restrict__ bias, int E, int M,
-                              int* __restrict__ idx, float* __restrict__ wts, float route_scale) {
+                              int* __restrict__ idx, float* __restrict__ wts, float route_scale,
+                              const float* __restrict__ bias2, const uint8_t* __restrict__ use2) {
   const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
   pdl_launch_dependents();
   pdl_wait();
   if (warp >= M) return;
   int id;
   float wv;
-  router_row(logits + (size_t)warp * E, bias, E, route_scale, id, wv);
+  router_row(logits + (size_t)warp * E, use2 && use2[warp] ? bias2 : bias, E, route_scale, id, wv);
   if (lane < kTopK) idx[warp * kTopK + lane] = id, wts[warp * kTopK + lane] = wv;
 }
 
@@ -74,9 +75,10 @@ void rmsnorm(const __nv_bfloat16* x, const __nv_bfloat16* w, int M, int D, float
 }
 
 void router_topk(const float* logits, const float* bias, int M, int E, int* idx, float* wts, float route_scale,
-                 cudaStream_t st) {
-  if (E > 512) die("router_topk: E=%d", E);
-  launch_pdl(k_router_topk, dim3((M + 3) / 4), dim3(128), 0, st, true, logits, bias, E, M, idx, wts, route_scale);
+                 cudaStream_t st, const float* bias2, const uint8_t* use2) {
+  if (E > 512 || !bias2 != !use2) die("router_topk: E=%d", E);
+  launch_pdl(k_router_topk, dim3((M + 3) / 4), dim3(128), 0, st, true, logits, bias, E, M, idx, wts, route_scale, bias2,
+             use2);
 }
 
 }  // namespace dsk

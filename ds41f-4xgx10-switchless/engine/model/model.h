@@ -13,6 +13,7 @@
 #include "engram/engram.h"
 #include "model/config.h"
 #include "model/ops.h"
+#include "vision/vision.h"
 #include "weights/loader.h"
 
 namespace model {
@@ -143,6 +144,14 @@ struct Options {
   bool tree_probe = false;
 };
 
+// A prompt position inside an image span holds no token: the front-end sends a negative id there,
+// 0x80000000 | 30 bits of the image's digest, the same at every position of the span (docs/vision.md).
+// Two images then never share a prefix in the session caches. The model embeds the span from the vision
+// tower's rows (set_images), routes it with bias_vl, and Engram treats it as dead.
+inline bool image_id(int32_t id) { return id < 0; }
+constexpr int32_t kImageTokenId = 129264;  // <｜deepseek_image｜>: the embedding the span's rows replace
+constexpr int kMaxImageRows = 8192;         // aligner rows of one request's images, at most
+
 class Model {
  public:
   // CUDA must be initialised. Allocates the state (do this before reading weights).
@@ -235,6 +244,18 @@ class Model {
   // CED chunks of one run (each chunk starting where the one before ended), P >= 128. Of the snapshots
   // only one at P covers the decoder layers; the others hold the encoder layers' rings only.
   void set_tokens(int pos0, int n, const int32_t* tokens);
+  // The vision tower (vision/vision.h) from its safetensors file: after prefill_init(), before the session
+  // store takes the free memory. Without it no prompt may hold an image position.
+  void load_vision(const std::string& path);
+  bool has_vision() const;
+  // A request's images, every rank alike (kCmdImages), before the prefill chunks that cover their spans:
+  // image k's span starts at prompt position pos; the tower runs now. Replaces the last request's set.
+  struct ImageIn {
+    int pos = 0;
+    vis::Grid g;
+    const uint8_t* pixels = nullptr;  // the letterboxed image (vis::Vision::encode)
+  };
+  void set_images(const std::vector<ImageIn>& images);
   void prefill_lookup(int a, int M);
   // The prefill path's buffers and the weights it gathers, made now instead of by the first prefill:
   // every rank at the same point, after set_engram(). This rank's allocations come before ring's host
