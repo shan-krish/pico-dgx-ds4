@@ -20,6 +20,8 @@ pub const T_DONE: u16 = 0x83;
 pub const FLAG_SEED: u32 = 1;
 pub const FLAG_KEEP: u32 = 2;
 pub const FLAG_LOGPROBS: u32 = 4;
+/// This request's session is served by the abliterated variant (engine: Options::ablit).
+pub const FLAG_ABLIT: u32 = 8;
 
 pub const TOK_LOGPROBS: u32 = 1;
 pub const TOK_TOP: u32 = 2;

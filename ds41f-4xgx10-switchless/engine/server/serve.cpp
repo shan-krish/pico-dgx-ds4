@@ -340,6 +340,7 @@ class Io {
 };
 
 struct Session {
+  int ablit = 0;               // 0 stock, 1 abliterated (fe::kFlagAblit of the request that made it)
   int h = 0;                   // the store's handle, the same on every rank
   int slot = -1;               // the slot whose working state is this session's (-1: none, the store's only)
   std::vector<int32_t> hist;   // the tokens whose state the session holds: positions [0, size)
@@ -567,7 +568,9 @@ class Server {
     for (size_t s = 0; s < slot_.size(); ++s) {
       const auto it = slot_[s] ? sess_.find(slot_[s]) : sess_.end();
       c.live[s] = it == sess_.end() ? 0 : it->second.h;
+      c.slot_var[s] = it == sess_.end() ? 0 : it->second.ablit;
     }
+    for (size_t s = slot_.size(); s < model::kMaxSlots; ++s) c.slot_var[s] = 0;
     bcast(ring_, c);
     apply_ops(m_, c);
   }
@@ -867,6 +870,8 @@ class Server {
     if (n < 1) err = "empty prompt";
     else if (n >= o_.max_ctx) err = "a prompt of " + std::to_string(n) + " tokens does not fit the context of " + std::to_string(o_.max_ctx);
     else if (h.session_id == 0) err = "session id 0";
+    else if (const Session* S = find(h.session_id); S && S->ablit != ((h.flags & fe::kFlagAblit) ? 1 : 0))
+      err = "this session was created for the other variant; open a new session id";
     else if (h.max_new_tokens < 1) err = "max_new_tokens 0";
     else if (f.rq.stop.size() > (size_t)kMaxStop) err = "more than " + std::to_string(kMaxStop) + " stop ids";
     else if (!(h.temperature >= 0.f) || !(h.top_p > 0.f && h.top_p <= 1.f)) err = "bad sampling parameters";
@@ -971,6 +976,7 @@ class Server {
     if (!S) {
       Session ns;
       ns.h = next_h_++;
+      ns.ablit = (h.flags & fe::kFlagAblit) ? 1 : 0;
       S = &sess_.emplace(h.session_id, std::move(ns)).first->second;
     }
     if (src) {

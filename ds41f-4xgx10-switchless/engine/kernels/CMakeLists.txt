@@ -1,4 +1,5 @@
 add_library(dsk_kernels STATIC
+  ablit.cu
   act_quant.cu
   gemv_fp8.cu
   moe.cu

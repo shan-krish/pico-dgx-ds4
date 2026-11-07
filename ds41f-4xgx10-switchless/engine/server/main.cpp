@@ -262,6 +262,7 @@ struct Args {
   std::string mode = "prefill";
   std::string golden = "/data/dsgb10/golden/prose";
   std::string weights, hashmap, shard[2];
+  std::string ablit;  // dual-variant serving: the directory holding ablit.bin (0 stock, 1 abliterated)
   bool inject = false, inject_sub = false, no_engram = false, quiet = false, graphs = true, per_position = false;
   bool profile = false;  // decode: the decode loop is nsys's capture range (--capture-range=cudaProfilerApi)
   bool loop = false, big = false, ced = false, exact = false, graph_sweep = false;
@@ -326,6 +327,7 @@ Args parse(int argc, char** argv) {
     else if (s == "--hashmap") a.hashmap = val();
     else if (s == "--shard1") a.shard[0] = val();
     else if (s == "--shard14") a.shard[1] = val();
+    else if (s == "--ablit") a.ablit = val();  // enables the rank-1 abliteration hook
     else if (s == "--inject") a.inject = true;
     else if (s == "--inject-sub") a.inject = a.inject_sub = true;
     else if (s == "--no-engram") a.no_engram = true;
@@ -575,6 +577,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaFree(nullptr));
   model::Options mo;
   mo.max_ctx = a.max_ctx;
+  mo.ablit = a.ablit.empty() ? nullptr : a.ablit.c_str();
   mo.n_layers = a.layers;
   mo.first_layer = a.first;
   mo.graphs = a.graphs;

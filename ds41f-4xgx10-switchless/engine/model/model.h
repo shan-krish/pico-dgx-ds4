@@ -141,6 +141,10 @@ struct Options {
   // EXPERIMENT, bench only (docs/engine.md, "Draft trees"): every spec step's draft pass also runs the
   // drafter's probe (dspark::Draft::probe) along SpecCfg::probe, into SampleOut::probe
   bool tree_probe = false;
+  // Dual-variant serving: a directory holding ablit.bin (this build's layout: see ablit_load), or null.
+  // When set, a step whose slot_var marks rows abliterated has the rank-1 projection applied to wo_b's
+  // partials on layers [ablit_lo, ablit_hi]. Without the file the option is refused, not ignored.
+  const char* ablit = nullptr;
 };
 
 class Model {
@@ -168,6 +172,9 @@ class Model {
   // snapshots) act on slot s, and the steps launched have their rows in slot s. Every rank must make the
   // same calls. Slot 0 at the start.
   void use_slot(int s);
+  // Per-slot variants for the commands after this call (0 stock, 1 abliterated; kMaxSlots ints).
+  // Read-only unless Options::ablit is set; a stock table is a bitwise no-op.
+  void set_slot_variants(const int32_t* v);
   int slot() const;
   int slots() const;
   int slot_ctx(int s) const;  // positions slot s holds (Options::big_slots)

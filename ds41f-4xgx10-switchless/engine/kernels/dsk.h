@@ -336,4 +336,11 @@ struct L2pfState {  // device memory: how far a layer's windows got (they run in
 void l2pf_window(const L2pfTarget (&t)[kL2pfTargets], int layer, int window, int R, const unsigned long long* arrived,
                  const unsigned long long* finished, L2pfState* state, cudaStream_t s);
 
+// Rank-1 abliteration (kernels/ablit.cu): on every rank's wo_b partials, for the step's rows whose
+// StepIn::var is 1, y[r] -= lam * (r . y[r]) * r. Linear, so it commutes with the partials' all-reduce.
+// slot != null: the row's variant is slot_var[slot[row]]; slot == null: all_var for the whole chunk.
+void ablit_rows(__nv_bfloat16* y, int K, const float* r, float lam, const int* slot_var, const int32_t* slot, int R,
+                int nslots, int all_var, cudaStream_t st);
+void ablit_row_reference(float* y, int K, const float* r, float lam);
+
 }  // namespace dsk

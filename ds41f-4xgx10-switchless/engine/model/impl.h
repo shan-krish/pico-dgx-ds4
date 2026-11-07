@@ -152,6 +152,14 @@ struct Model::Impl {
 
   // step inputs and results
   ops::StepIn *in_h, *in_d;  // pinned ring [kInSlots] (the host writes), device copy (kernels read)
+  // Dual-variant serving (kernels/ablit.cu, Options::ablit): r and the per-layer lambda, on the device.
+  bool ablit_on = false;
+  float *d_r = nullptr, *d_lam = nullptr;
+  int ablit_lo = 10, ablit_hi = 35;
+  int32_t host_slot_var[kMaxSlots] = {};   // the server's per-slot variants for the current command
+  int32_t* d_slot_var = nullptr;           // the same, on the device
+  const int32_t* cur_row_slot = nullptr;   // this step's row->slot map (null in prefill)
+  int cur_all_var = 0;                     // prefill: the chunk's single variant
   const int *tok_d, *pos_d;  // in_d->tokens, in_d->pos
   uint32_t* in_ctr;          // device: steps started (step_in's slot)
   int32_t* fb;               // device [kMaxRows]: the last step's sampled tokens
@@ -229,6 +237,8 @@ struct Model::Impl {
 
   // ---- session slots ------------------------------------------------------------------------
   void use_slot(int s);
+  // The command's per-slot variants (0 stock, 1 abliterated); a stock table is a bitwise no-op.
+  void set_slot_variants(const int32_t* v);
   // A step's view of the state: with one slot, its pointers (the kernels' one-session code, no table); with
   // more, slot 0's and the step's slot table (in_d->slot), so that one captured step serves rows in any slots.
   attn::Window step_win(int L) const;

@@ -106,6 +106,8 @@ fn serve(args: &[String]) {
     }
     let cfg = ServerConfig {
         model_name: opt(args, "--model-name").unwrap_or_else(|| "deepseek-v4.1-flash-uncensored".into()),
+        ablit_model_name: opt(args, "--ablit-model-name")
+            .unwrap_or_else(|| "deepseek-v4.1-flash-abliterated".into()),
         api_key,
         max_tokens_cap: parse_opt(args, "--max-tokens", 32768u32),
         default_effort: parse_opt(args, "--effort", 75i64).clamp(1, 100),

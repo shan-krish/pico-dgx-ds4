@@ -737,6 +737,7 @@ void follow(model::Model& m, comm::Ring& ring, Watchdog& wd, int rank) {
       CUDA_CHECK(cudaProfilerStart());
       prof = true;
     }
+    m.set_slot_variants(c.slot_var);  // the command's per-slot variants (0 stock, 1 abliterated)
     apply_ops(m, c);         // first, whatever the command
     (void)m.state_evicted();  // rank 0's server keeps track of the sessions
     if (c.op == kCmdStep) {

@@ -30,6 +30,8 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub model_name: String,
+    /// The abliterated variant's name, served beside model_name (empty: one model only).
+    pub ablit_model_name: String,
     pub api_key: Option<String>,
     /// Default and cap for max_tokens (the kit's DSV41_MAX_NEW_TOKENS).
     pub max_tokens_cap: u32,
@@ -185,7 +187,9 @@ async fn models(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     let max_len = app.engine.info().map(|i| i.max_context);
     let body = json!({"object": "list", "data": [{
         "id": app.cfg.model_name, "object": "model", "created": 0, "owned_by": "dsgb10",
-        "root": app.cfg.model_name, "max_model_len": max_len}]});
+        "root": app.cfg.model_name, "max_model_len": max_len},
+      { "id": app.cfg.ablit_model_name, "object": "model", "created": 0, "owned_by": "dsgb10",
+        "root": app.cfg.ablit_model_name, "max_model_len": max_len}]});
     (StatusCode::OK, [("content-type", "application/json")], body.to_string()).into_response()
 }
 
@@ -193,6 +197,8 @@ async fn models(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
 
 /// What the request asks for, with the prompt rendered.
 pub struct Prepared {
+    /// the request's `model` field (empty when it sent none): names the variant
+    pub model: String,
     pub prompt: String,
     pub mode: ThinkingMode,
     pub tools: bool,
@@ -422,7 +428,9 @@ pub fn prepare(cfg: &ServerConfig, req: &Value) -> Result<Prepared, String> {
     let ignore_eos = truthy(r.get("ignore_eos"));
     let stream = truthy(r.get("stream"));
     let include_usage = truthy(r.get("stream_options").and_then(|s| s.get("include_usage")));
+    let model = r.get("model").and_then(Value::as_str).unwrap_or("").to_string();
     Ok(Prepared {
+        model,
         prompt,
         mode,
         tools: !tools.is_empty(),
@@ -641,12 +649,15 @@ async fn start(app: &Arc<App>, p: &Prepared, pass: Pass) -> Result<Gen, ApiError
     let Some(info) = app.engine.info() else {
         return Err(unavailable("engine not connected".into()));
     };
+    // model name -> variant: the abliterated name selects the rank-1 projection, anything else stock
+    let ablit: u32 = if p.model.is_empty() { 0 } else { (p.model == app.cfg.ablit_model_name) as u32 };
     let (plan, released) = {
         let app2 = app.clone();
         let text = p.prompt.clone();
+        let variant = ablit as u8;
         tokio::task::spawn_blocking(move || {
             let mut t = app2.sessions.lock().unwrap();
-            t.plan(&text, &app2.tok, app2.cfg.tokenize_threads)
+            t.plan(&text, &app2.tok, app2.cfg.tokenize_threads, variant)
         })
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "server_error".into(), e.to_string()))?
@@ -677,7 +688,9 @@ async fn start(app: &Arc<App>, p: &Prepared, pass: Pass) -> Result<Gen, ApiError
         top_p: p.top_p,
         top_k: p.top_k,
         max_new_tokens: max_new,
-        flags: FLAG_KEEP | if p.seed.is_some() { FLAG_SEED } else { 0 },
+        flags: FLAG_KEEP
+            | if p.seed.is_some() { FLAG_SEED } else { 0 }
+            | if ablit == 1 { crate::protocol::FLAG_ABLIT } else { 0 },
         n_top_logprobs: 0,
         prefix_hint: plan.reused as u32,
         stop_ids: stop_ids.clone(),

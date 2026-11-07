@@ -37,6 +37,7 @@ enum SubmitFlags : uint32_t {
   kFlagSeed = 1,      // use SubmitHeader::seed
   kFlagKeep = 2,      // keep the session's state after DONE
   kFlagLogprobs = 4,  // send logprobs in TOKENS
+  kFlagAblit = 8,     // this session's requests are served by the abliterated variant (Options::ablit)
 };
 
 struct SubmitHeader {

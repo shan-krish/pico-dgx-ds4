@@ -23,6 +23,9 @@ const MIN_SHARED: usize = 64;
 const PROMPT_SLACK: usize = 16;
 
 struct Session {
+    /// 0 stock, 1 abliterated: a session's KV is computed under one variant, and a session
+    /// of one variant is never matched, forked or reused by the other
+    variant: u8,
     text: String,
     ids: Vec<u32>,
     /// ends[i] = byte length of the text of ids[..=i]
@@ -243,7 +246,8 @@ impl SessionTable {
             if at != text.len() || tok.decode_bytes(&ids) != text.as_bytes() {
                 continue; // another tokenizer's ids
             }
-            got.insert(id, Session { text: text.to_string(), ids, ends, prompt_len, busy: false, last_used, t_used });
+            got.insert(id, Session { variant: (id & 1) as u8, text: text.to_string(), ids, ends, prompt_len,
+                                     busy: false, last_used, t_used });
         }
         if r.at != body.len() {
             return Err("a bad body".into());
@@ -256,18 +260,21 @@ impl SessionTable {
         Ok(k)
     }
 
-    fn new_id(&mut self) -> u64 {
-        let id = self.next_id;
+    fn new_id(&mut self, variant: u8) -> u64 {
+        let id = (self.next_id << 1) | (variant as u64 & 1);  // the variant is part of the id
         self.next_id += 1;
         id
     }
 
     /// Choose the session and the token ids for a prompt. The chosen session is busy until
     /// `finish` or `abandon`. Returns the plan and the sessions to RELEASE on the engine.
-    pub fn plan(&mut self, text: &str, tok: &Tokenizer, threads: usize) -> (Plan, Vec<u64>) {
+    pub fn plan(&mut self, text: &str, tok: &Tokenizer, threads: usize, variant: u8) -> (Plan, Vec<u64>) {
         self.clock += 1;
         let mut top: Option<(u64, usize)> = None;
         for (&id, s) in &self.sessions {
+            if s.variant != variant {
+                continue;  // the other variant's KV is not ours to reuse
+            }
             let n = common_prefix(text.as_bytes(), s.text.as_bytes());
             if n > 0 && top.map_or(true, |(_, bn)| n > bn) {
                 top = Some((id, n));
@@ -275,7 +282,7 @@ impl SessionTable {
         }
         let best = top.filter(|&(_, n)| n >= MIN_SHARED);
         let (mut plan, cut) = match best {
-            None => (Plan { session_id: self.new_id(), base_session_id: 0, reused: 0, ids: Vec::new(), matched: 0, shared: 0, common: 0 }, 0),
+            None => (Plan { session_id: self.new_id(variant), base_session_id: 0, reused: 0, ids: Vec::new(), matched: 0, shared: 0, common: 0 }, 0),
             Some((sid, mut shared)) => {
                 while !text.is_char_boundary(shared) {
                     shared -= 1;
@@ -301,7 +308,7 @@ impl SessionTable {
                 let plan = if in_place {
                     Plan { session_id: sid, base_session_id: 0, reused: cut.1, ids, matched: 0, shared: 0, common: 0 }
                 } else {
-                    Plan { session_id: self.new_id(), base_session_id: sid, reused: cut.1, ids, matched: 0, shared: 0, common: 0 }
+                    Plan { session_id: self.new_id(variant), base_session_id: sid, reused: cut.1, ids, matched: 0, shared: 0, common: 0 }
                 };
                 (plan, cut.0)
             }
@@ -315,6 +322,7 @@ impl SessionTable {
         }
         let clock = self.clock;
         let s = self.sessions.entry(plan.session_id).or_insert_with(|| Session {
+            variant,
             text: String::new(),
             ids: Vec::new(),
             ends: Vec::new(),

@@ -431,6 +431,9 @@ void Model::Impl::attention_p(int L, int a, int M, const std::vector<std::pair<i
     for (int k = 0; k < kRanks; ++k)
       if (k != rank) wob(k, p.oqa + (size_t)k * Q * kOPart, p.osa + (size_t)k * Q * (kOPart / 32));
     dsk::sum4_bf16_p(p.part, (size_t)Q * kDim, (size_t)n * kDim, p.sub, st);
+    // Dual-variant serving: the chunk's rows are all one session's, so one table entry decides.
+    if (ablit_on && L >= ablit_lo && L <= ablit_hi)
+      dsk::ablit_rows(p.sub, kDim, d_r, d_lam[L], nullptr, nullptr, n, kMaxSlots, cur_all_var, st);
     boundary_p(n, p.sub, p.x, p.a_post, p.a_comb, p.a_pre, p.mid, L, 1, p.pm, p.f_post, p.f_comb);
   }
 }
@@ -599,6 +602,7 @@ uint64_t Model::Impl::prefill(int a, int M, const Sampling* sp, int handle, cons
   }
   p.rq = q_rows(M), p.r0 = rank * p.rq, p.n = std::max(0, std::min(p.rq, M - p.r0));
   const int slot = (int)(n_steps % ops::kOutSlots);
+  cur_row_slot = nullptr, cur_all_var = host_slot_var[cur_unit];  // a chunk is one session
   CUDA_CHECK(cudaEventRecord(ev_beg[slot], st));
   CUDA_CHECK(cudaEventRecord(ev_pf[0], st));
   std::memcpy(p.tok_h, hist.data() + a, (size_t)M * 4);

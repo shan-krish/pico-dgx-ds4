@@ -195,6 +195,34 @@ Model::Impl::Impl(int r, const Options& op) : rank(r), opt(op) {
   inj_h = halloc<uint8_t>((size_t)R * (kHcDim * 2 + kHc * 4));
   inj_g = dalloc<uint8_t>((size_t)kRanks * R * (kHcDim * 2 + kHc * 4));
   CUDA_CHECK(cudaStreamSynchronize(st));
+  // Dual-variant serving: r + per-layer lambda. ablit.bin: 'ABLT', u32 version, u32 K, u32 nlam,
+  // u32 lo, u32 hi, float r[K], float lam[nlam].  Nothing is loaded unless Options::ablit is set.
+  if (opt.ablit) {
+    std::string f = std::string(opt.ablit) + "/ablit.bin";
+    FILE* fp = fopen(f.c_str(), "rb");
+    if (!fp) die("model: cannot open %s (--ablit needs ablit.bin)", f.c_str());
+    char magic[4] = {0};
+    uint32_t ver = 0, K = 0, nlam = 0, lo = 0, hi = 0;
+    if (fread(magic, 1, 4, fp) != 4 || fread(&ver, 4, 1, fp) != 1 || fread(&K, 4, 1, fp) != 1 ||
+        fread(&nlam, 4, 1, fp) != 1 || fread(&lo, 4, 1, fp) != 1 || fread(&hi, 4, 1, fp) != 1)
+      die("model: %s: short header", f.c_str());
+    if (memcmp(magic, "ABLT", 4) != 0 || ver != 1 || (int)K != kDim || nlam < 1 || (int)hi >= kLayers)
+      die("model: %s: not an ABLT v1 file for kDim=%d (K=%u nlam=%u lo=%u hi=%u)", f.c_str(), kDim, K, nlam, lo, hi);
+    std::vector<float> r(K), lam(nlam);
+    if (fread(r.data(), 4, K, fp) != K || fread(lam.data(), 4, nlam, fp) != nlam)
+      die("model: %s: short body", f.c_str());
+    fclose(fp);
+    d_r = dalloc<float>(K);
+    d_lam = dalloc<float>(kLayers);
+    std::vector<float> lam_full(kLayers, 0.f);
+    for (uint32_t i = 0; i < nlam; i++) lam_full[lo + i] = lam[i];
+    CUDA_CHECK(cudaMemcpy(d_r, r.data(), (size_t)K * 4, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_lam, lam_full.data(), (size_t)kLayers * 4, cudaMemcpyHostToDevice));
+    d_slot_var = dalloc<int32_t>(kMaxSlots);
+    CUDA_CHECK(cudaMemset(d_slot_var, 0, sizeof(int32_t) * kMaxSlots));
+    ablit_on = true, ablit_lo = (int)lo, ablit_hi = (int)hi;
+    if (rank == 0) fprintf(stderr, "model: abliteration armed, layers %u-%u from %s\n", lo, hi, f.c_str());
+  }
 }
 
 Model::Impl::~Impl() {
@@ -421,6 +449,14 @@ size_t Model::Impl::code_head(int* raw_tiles) {
 }
 
 // ---- session slots ----------------------------------------------------------------------------
+
+void Model::set_slot_variants(const int32_t* v) { d_->set_slot_variants(v); }
+
+void Model::Impl::set_slot_variants(const int32_t* v) {
+  for (int i = 0; i < kMaxSlots; ++i) host_slot_var[i] = v ? v[i] : 0;
+  if (!ablit_on || !d_slot_var) return;
+  CUDA_CHECK(cudaMemcpyAsync(d_slot_var, host_slot_var, sizeof host_slot_var, cudaMemcpyHostToDevice, st));
+}
 
 void Model::Impl::use_slot(int s) {
   if (s < 0 || s >= nslots) die("model: slot %d of %d", s, nslots);
@@ -656,6 +692,10 @@ void Model::Impl::attention(int L, int R, int ctx, bool dumps, bool sub_in, Sink
     dsk::gemv_woa(o, R, w.woa, w.soa, kOPart, kWoaK, kOGroupRows, nullptr, cwoa, false, st, oq, os);
     dsk::gemv_fp8(oq, os, R, w.wob, w.sob, kDim, kOPart, part, c8, st);
   }
+  // Dual-variant serving: rank-1 abliteration of the attention output, on this rank's wo_b partials.
+  // Linear, so it commutes with the all-reduce below; rows of a stock session's slot are untouched.
+  if (ablit_on && L >= ablit_lo && L <= ablit_hi)
+    dsk::ablit_rows(part, kDim, d_r, d_lam[L], d_slot_var, cur_row_slot, R, kMaxSlots, cur_all_var, st);
   l2pf(4, L, R);
   join(sa);
   ops::allreduce_hc(ch, part, false, R, x, a_post, a_comb, a_pre, mid, yraw, dumps ? sub : nullptr, st);
@@ -868,6 +908,7 @@ uint64_t Model::Impl::run_step(uint64_t n, int R, int ctx, uint32_t flags, Sink*
   uint32_t eager = flags & (kFlagInject | kFlagInjectSub | kFlagLogits);
   if (rank == 0 && sink) eager |= flags & kFlagDump;
   const int slot = (int)(n % ops::kOutSlots);
+  cur_row_slot = in_d->slot;  // this step's rows carry their session slot
   CUDA_CHECK(cudaEventRecord(ev_beg[slot], st));
   if (opt.graphs && !eager && warm[R]) {
     CUDA_CHECK(cudaGraphLaunch(graph(R, ctx), st));

@@ -77,6 +77,9 @@ struct Cmd {
   // the store's handles of the sessions live in the slots (0: none): pinned like the command's own, so
   // that no allocation evicts the stored part of a session whose working state a slot holds
   int32_t live[model::kMaxSlots] = {};
+  // each slot's variant (0 stock, 1 abliterated) for this command: the model's abliteration kernel reads
+  // the row's session slot and looks the variant up here
+  int32_t slot_var[model::kMaxSlots] = {};
   int32_t tokens[model::kMaxRows] = {};  // kCmdDecode: tokens[0] is the first step's
   model::Sampling sp{};
   int32_t max_new = 0;  // kCmdDecode: tokens to sample (the loop may compute one more position)
